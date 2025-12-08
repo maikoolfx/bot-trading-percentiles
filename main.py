@@ -3,40 +3,39 @@ import numpy as np
 import pandas as pd
 import requests
 import os
-import sys
 
 # --- CONFIGURACIÓN ---
-# Tickers de Futuros en Yahoo Finance:
-# ES=F -> S&P 500 Futures
+# Tickers de Futuros:
 # NQ=F -> Nasdaq 100 Futures
+# ES=F -> S&P 500 Futures
 TICKERS = ["NQ=F", "ES=F"] 
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
-# Días a proyectar (Solo mañana)
+# Días a proyectar (Solo mañana = 1)
 DAYS_AHEAD = 1
 N_SIMS = 10000
 
 def send_discord_embed(data_list):
     """Envía un Embed profesional a Discord con los datos calculados."""
     if not DISCORD_WEBHOOK_URL:
-        print("❌ Error: No se encontró la URL del Webhook.")
+        print("❌ Error: No se encontró la URL del Webhook (Variable de entorno no definida).")
         return
 
     embeds = []
     
     for item in data_list:
-        # Definir color basado en si la proyección es alcista o bajista (vs precio actual)
-        color = 5763719 # Verde (bullish)
+        # Definir color: Verde si la proyección media es alcista, Rojo si es bajista
+        color = 5763719 # Verde
         if item['expected'] < item['last_price']:
-            color = 15548997 # Rojo (bearish)
+            color = 15548997 # Rojo
 
         embed = {
-            "title": f"📊 Proyección Cuantitativa: {item['ticker']}",
-            "description": f"Análisis de volatilidad y percentiles para el **{item['date']}**.",
+            "title": f"📊 Proyección: {item['ticker']}",
+            "description": f"Percentiles institucionales para el **{item['date']}**.",
             "color": color,
             "fields": [
                 {
-                    "name": "Precio Actual",
+                    "name": "Precio Cierre Hoy",
                     "value": f"**{item['last_price']:.2f}**",
                     "inline": True
                 },
@@ -51,30 +50,30 @@ def send_discord_embed(data_list):
                     "inline": True
                 },
                 {
-                    "name": "📉 Soporte Extremo (P1 - P5)",
+                    "name": "📉 Soporte (P1 - P5)",
                     "value": f"P1: {item['p1']}\nP5: {item['p5']}",
                     "inline": True
                 },
                 {
-                    "name": "🎯 Rango Central (P50)",
+                    "name": "🎯 Rango Medio (P50)",
                     "value": f"**{item['p50']}**",
                     "inline": True
                 },
                 {
-                    "name": "📈 Resistencia Extrema (P95 - P99)",
+                    "name": "📈 Resistencia (P95 - P99)",
                     "value": f"P95: {item['p95']}\nP99: {item['p99']}",
                     "inline": True
                 }
             ],
             "footer": {
-                "text": "Quant Engine | Monte Carlo Simulation | Nivel de Confianza: 95%"
+                "text": "Quant Engine | Monte Carlo Simulation | Confianza: 95%"
             }
         }
         embeds.append(embed)
 
     payload = {
         "username": "Quant Engine Bot",
-        "avatar_url": "https://i.imgur.com/4M34hi2.png", # Puedes poner un logo aquí
+        "avatar_url": "https://i.imgur.com/4M34hi2.png", 
         "embeds": embeds
     }
 
@@ -92,47 +91,61 @@ def run_simulation():
     
     for ticker in TICKERS:
         try:
+            print(f"--- Procesando {ticker} ---")
             # 1. Obtener datos
-            data = yf.download(ticker, period="1y", interval="1d", progress=False)
+            # auto_adjust=True ayuda a limpiar splits y dividendos
+            df = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=True)
             
-            # Ajuste por si yfinance devuelve MultiIndex
-            if isinstance(data.columns, pd.MultiIndex):
-                data = data["Close"]
-            else:
-                data = data["Close"]
-            
-            data = data.dropna()
-            
-            if data.empty:
+            if df.empty:
                 print(f"⚠️ Sin datos para {ticker}")
                 continue
 
-            # 2. Cálculos Base
+            # Limpieza robusta de la estructura de datos de yfinance
+            # A veces devuelve MultiIndex o DataFrames anidados
+            try:
+                if 'Close' in df.columns:
+                    data = df['Close']
+                else:
+                    # Intento de fallback si la columna no se llama exactamente 'Close'
+                    data = df.iloc[:, 0]
+                
+                # Si sigue siendo un DataFrame (p.ej. columnas multi-nivel), tomamos la primera serie
+                if isinstance(data, pd.DataFrame):
+                    data = data.iloc[:, 0]
+            except Exception as e:
+                print(f"❌ Error extrayendo columna Close: {e}")
+                continue
+            
+            # Eliminar NaNs
+            data = data.dropna()
+
+            # 2. Cálculos Base (CORRECCIÓN IMPORTANTE AQUÍ)
             returns = data.pct_change().dropna()
-            mean_r = returns.mean()
-            std_r = returns.std(ddof=0) # ddof=0 para población, 1 para muestra. 
             
-            # Usamos el último precio REAL (no media)
-            last_price = float(data.iloc[-1]) 
+            # Convertimos explícitamente a float para evitar errores de formato en Pandas Series
+            mean_r = float(returns.mean())
+            std_r = float(returns.std(ddof=0))
+            last_price = float(data.iloc[-1])
             
-            # 3. Monte Carlo Vectorizado
-            # Generamos retornos aleatorios
+            # 3. Simulación Monte Carlo
+            # Generamos retornos aleatorios (Normal Distribution)
             rand_returns = np.random.normal(mean_r, std_r, size=(N_SIMS, DAYS_AHEAD))
             
             # Caminos de precio: Precio_Ultimo * (1 + retorno)
-            price_paths = last_price * (1 + rand_returns) # Para 1 día es simple
+            price_paths = last_price * (1 + rand_returns) 
             
-            # 4. Resultados del Día +1 (Columna 0 porque es 1 solo día)
+            # 4. Resultados del Día +1
+            # Tomamos la columna 0 (el primer día proyectado)
             simulated_prices = price_paths[:, 0]
             
             # Percentiles
-            p1 = np.percentile(simulated_prices, 1)
-            p5 = np.percentile(simulated_prices, 5)
-            p50 = np.percentile(simulated_prices, 50)
-            p95 = np.percentile(simulated_prices, 95)
-            p99 = np.percentile(simulated_prices, 99)
+            p1 = float(np.percentile(simulated_prices, 1))
+            p5 = float(np.percentile(simulated_prices, 5))
+            p50 = float(np.percentile(simulated_prices, 50))
+            p95 = float(np.percentile(simulated_prices, 95))
+            p99 = float(np.percentile(simulated_prices, 99))
             
-            expected_price = np.mean(simulated_prices)
+            expected_price = float(np.mean(simulated_prices))
             vol_annual = std_r * np.sqrt(252) * 100
             
             # Fecha objetivo (Mañana)
@@ -143,7 +156,7 @@ def run_simulation():
                 "date": target_date.strftime('%Y-%m-%d'),
                 "last_price": last_price,
                 "expected": expected_price,
-                "volatility": vol_annual,
+                "volatility": vol_annual, # Ahora esto es un float puro
                 "p1": f"{p1:.2f}",
                 "p5": f"{p5:.2f}",
                 "p50": f"{p50:.2f}",
@@ -153,6 +166,9 @@ def run_simulation():
             
         except Exception as e:
             print(f"❌ Error procesando {ticker}: {e}")
+            # Imprimir detalle del error para debugging
+            import traceback
+            traceback.print_exc()
             continue
 
     # Enviar reporte si hay datos
