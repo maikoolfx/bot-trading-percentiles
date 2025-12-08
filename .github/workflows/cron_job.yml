@@ -1,0 +1,33 @@
+name: Daily Quant Report
+
+on:
+  schedule:
+    # Minuto Hora DiaMes Mes DiaSemana
+    # Ejecutar a las 03:00, 04:00 y 05:00 UTC (Equivalente a 21, 22, 23 PM MX)
+    - cron: '0 3,4,5 * * *'
+  
+  # Permite ejecutarlo manualmente desde GitHub si quieres probar
+  workflow_dispatch:
+
+jobs:
+  run-analysis:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Descargar Repositorio
+        uses: actions/checkout@v3
+
+      - name: 🐍 Configurar Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: 📦 Instalar Dependencias
+        run: |
+          pip install -r requirements.txt
+
+      - name: 🚀 Ejecutar Quant Engine
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          python main.py
